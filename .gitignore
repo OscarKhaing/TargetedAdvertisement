@@ -15,3 +15,5 @@ venv/
 
 # Local deploy notes
 deploy-notes.txt
+
+server.txt
