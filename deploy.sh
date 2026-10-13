@@ -7,6 +7,10 @@ cd "$(dirname "$0")"
 echo "==> Installing dependencies"
 .venv/bin/pip install -q -r requirements.txt
 
+# Fails here, before the restart, if the database isn't set up: the old code keeps serving.
+echo "==> Applying database schema"
+PGOPTIONS='-c client_min_messages=warning' psql -q -v ON_ERROR_STOP=1 -d boogle -f schema_handout.sql
+
 echo "==> Restarting boogle service"
 sudo systemctl restart boogle
 sleep 2
@@ -19,5 +23,7 @@ fi
 
 echo "==> Health check"
 curl -fsS http://localhost/jsontest
+echo
+curl -fsS http://localhost/api/history   # goes through the database
 echo
 echo "==> Deployed $(git log -1 --format='%h %s')"
