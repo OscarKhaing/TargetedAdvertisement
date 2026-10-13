@@ -65,11 +65,12 @@ def jsontest():
 @app.get('/search')
 def search():
     # Postgres text can't hold NUL bytes.
-    query = request.args.get('q', '').replace('\x00', '').strip()
+    query = request.args.get('q', '').replace('\x00', '')
     client_id = get_client_id()
     with db() as conn:
         request_id = log_request(conn, client_id)
-        if query:
+        # Stored exactly as typed; whitespace-only counts as empty.
+        if query.strip():
             conn.execute(
                 "INSERT INTO searches (client_id, request_id, query) VALUES (%s, %s, %s)",
                 (client_id, request_id, query))
