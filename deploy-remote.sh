@@ -18,6 +18,13 @@ if [[ "$(git rev-parse HEAD)" != "$(git rev-parse @{u})" ]]; then
     exit 1
 fi
 
+# The model is too big for git, so it goes straight to the VM, and only when it changed.
+if [[ "$(shasum -a 256 < model.npz | cut -d' ' -f1)" != "$(ssh "$HOST" 'sha256sum < ~/boogle/model.npz 2>/dev/null | cut -d" " -f1')" ]]; then
+    echo "==> Uploading model.npz"
+    scp -q model.npz "$HOST:boogle/model.npz.tmp"
+    ssh "$HOST" 'mv ~/boogle/model.npz.tmp ~/boogle/model.npz'
+fi
+
 echo "==> Deploying $(git log -1 --format='%h %s') to $HOST"
 ssh "$HOST" 'cd ~/boogle && git pull --ff-only -q && ./deploy.sh'
 

@@ -19,3 +19,6 @@ deploy-notes.txt
 server.txt
 # Part 3 model (regenerate with starter_3_4/part3/train_model.py)
 model.joblib
+
+# Exported model, uploaded to the VM by deploy-remote.sh
+model.npz

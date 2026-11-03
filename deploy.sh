@@ -11,6 +11,10 @@ echo "==> Installing dependencies"
 echo "==> Applying database schema"
 PGOPTIONS='-c client_min_messages=warning' psql -q -v ON_ERROR_STOP=1 -d boogle -f schema_handout.sql
 
+# Fails here too, before the restart, if the code or model can't load: same reason.
+echo "==> Checking the app loads"
+.venv/bin/python -c 'import app'
+
 echo "==> Restarting boogle service"
 sudo systemctl restart boogle
 sleep 2
@@ -22,7 +26,8 @@ if ! systemctl is-active --quiet boogle; then
 fi
 
 echo "==> Health check"
-curl -fsS http://localhost/jsontest
+# gunicorn only opens its ports once the model has loaded, so allow it a few seconds.
+curl -fsS --retry 15 --retry-connrefused --retry-delay 1 http://localhost/jsontest
 echo
 curl -fsS http://localhost/api/history   # goes through the database
 echo
