@@ -7,7 +7,7 @@ import psycopg
 from flask import Flask, jsonify, redirect, request, send_file
 
 from inference import Model
-from ssp import advertiser_domains, run_auction
+from ssp import advertiser_domains, run_auction, warm_connections
 
 app = Flask(__name__)
 app.json.sort_keys = False
@@ -62,6 +62,11 @@ def log_request(conn, client_id):
 def iso(ts):
     # e.g. 2026-09-16T18:04:11.512Z
     return ts.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+@app.before_request
+def prepare_for_auctions():
+    # Visits and searches come before ads, so connections are ready when the first /ad arrives.
+    warm_connections()
 
 @app.get('/')
 def index():

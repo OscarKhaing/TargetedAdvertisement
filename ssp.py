@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, wait
 
@@ -17,14 +18,39 @@ IMP_ID = '1'
 SLOT_W, SLOT_H = 300, 250
 BID_FLOOR = 0.50    # CPM in USD
 TMAX_MS = 250       # how long DSPs get to answer
-BILL_TIMEOUT = 2    # seconds
+HTTP_TIMEOUT = 2    # seconds, for anything sent to the exchange
 
-# One session reuses connections, so most auctions skip the TLS handshake and spend their
-# 250ms on bidding. The pool is shared by all threads: late DSPs can hold a thread past tmax.
+# A new TLS connection takes 300ms or more from the VM, longer than tmax, so an auction that
+# has to open one loses that DSP's bid. One shared session reuses connections instead (30-75ms).
+SPARE_CONNECTIONS = 8   # more than one auction needs: late DSPs can still be holding some
+WARM_EVERY = 60         # seconds
+last_warmed = 0.0
+
 session = requests.Session()
 for scheme in ('https://', 'http://'):
     session.mount(scheme, HTTPAdapter(pool_maxsize=32))
 executor = ThreadPoolExecutor(max_workers=32)
+
+
+def ping():
+    try:
+        session.get(RTB_URL + '/', timeout=HTTP_TIMEOUT)
+    except requests.RequestException:
+        pass
+
+
+def warm_connections():
+    """Opens spare connections in the background, at most once per WARM_EVERY.
+
+    Runs when a worker starts and on incoming requests rather than on a timer, so the
+    exchange gets no traffic from us while nobody is using Boogle.
+    """
+    global last_warmed
+    if time.monotonic() - last_warmed >= WARM_EVERY:
+        last_warmed = time.monotonic()
+        # Sent together, so that each needs a connection of its own.
+        for _ in range(SPARE_CONNECTIONS):
+            executor.submit(ping)
 
 
 def build_request(auction_id, client_id, segments, blocked, user_agent, ip):
@@ -52,8 +78,10 @@ def build_request(auction_id, client_id, segments, blocked, user_agent, ip):
 
 
 def ask_dsp(dsp, bid_request):
+    # collect_bids enforces tmax. Timing out here too would close the connection, and then
+    # some other DSP pays for opening a new one in the next auction.
     try:
-        return session.post(f'{RTB_URL}/{dsp}/bid', json=bid_request, timeout=TMAX_MS / 1000)
+        return session.post(f'{RTB_URL}/{dsp}/bid', json=bid_request, timeout=HTTP_TIMEOUT)
     except requests.RequestException:
         return None
 
@@ -119,7 +147,7 @@ def clearing_price(prices):
 
 def bill(bid, price):
     try:
-        return session.get(bid['burl'].replace(PRICE_MACRO, str(price)), timeout=BILL_TIMEOUT).ok
+        return session.get(bid['burl'].replace(PRICE_MACRO, str(price)), timeout=HTTP_TIMEOUT).ok
     except requests.RequestException:
         return False
 
