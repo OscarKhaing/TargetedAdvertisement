@@ -177,7 +177,7 @@ def ad():
 
     # Newest first and one per line, which is how the Part 3 model saw each user's searches.
     segments = model.segments("\n".join(query for query, in searches))
-    # No database connection is held here: this waits on the DSPs for up to 250ms.
+    # No database connection is held here: this waits on the DSPs for up to 400ms.
     auction = run_auction(client_id, segments, blocked, request.headers.get('User-Agent', ''), request.remote_addr)
 
     winner = auction['winner'] or {}

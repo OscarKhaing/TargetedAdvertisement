@@ -17,11 +17,16 @@ PRICE_MACRO = '${AUCTION_PRICE}'
 IMP_ID = '1'
 SLOT_W, SLOT_H = 300, 250
 BID_FLOOR = 0.50    # CPM in USD
-TMAX_MS = 250       # how long DSPs get to answer
+TMAX_MS = 250       # how long we tell DSPs they have to answer
+# When we stop listening, which is later than tmax on purpose. About 6% of the exchange's
+# responses stall for around 230ms on their way to us, on every URL and from every network we
+# tried, so bids the DSP sent on time arrive at 270-385ms. Bids that really are late start at
+# 528ms, so this keeps the first group and still drops the second.
+DEADLINE_MS = 400
 HTTP_TIMEOUT = 2    # seconds, for anything sent to the exchange
 
-# A new TLS connection takes 300ms or more from the VM, longer than tmax, so an auction that
-# has to open one loses that DSP's bid. One shared session reuses connections instead (30-75ms).
+# A new TLS connection takes 300-535ms from the VM, so an auction that has to open one can lose
+# that DSP's bid. One shared session reuses connections instead (30-75ms).
 SPARE_CONNECTIONS = 8   # more than one auction needs: late DSPs can still be holding some
 WARM_EVERY = 60         # seconds
 last_warmed = 0.0
@@ -78,8 +83,8 @@ def build_request(auction_id, client_id, segments, blocked, user_agent, ip):
 
 
 def ask_dsp(dsp, bid_request):
-    # collect_bids enforces tmax. Timing out here too would close the connection, and then
-    # some other DSP pays for opening a new one in the next auction.
+    # collect_bids enforces the deadline. Timing out here too would close the connection, and
+    # then some other DSP pays for opening a new one in the next auction.
     try:
         return session.post(f'{RTB_URL}/{dsp}/bid', json=bid_request, timeout=HTTP_TIMEOUT)
     except requests.RequestException:
@@ -129,9 +134,9 @@ def parse_bids(response, auction_id, blocked):
 
 
 def collect_bids(bid_request, blocked):
-    """Asks all DSPs at once and keeps what arrived within tmax. Late responses are ignored."""
+    """Asks all DSPs at once and keeps what arrived by the deadline. Late responses are ignored."""
     futures = [executor.submit(ask_dsp, dsp, bid_request) for dsp in DSPS]
-    done, _ = wait(futures, timeout=TMAX_MS / 1000)
+    done, _ = wait(futures, timeout=DEADLINE_MS / 1000)
     bids = []
     for future in futures:
         if future in done:

@@ -1,9 +1,11 @@
 # PA1 write-up: what we built and why
 
-Study notes covering Parts 1–3 of PA1. Each section explains the concepts first, then walks
+Study notes covering all four parts of PA1. Each section explains the concepts first, then walks
 through the code. Code walkthroughs quote the real files: [app.py](app.py),
-[deploy.sh](deploy.sh), [deploy-remote.sh](deploy-remote.sh),
-[starter_3_4/part3/train_model.py](starter_3_4/part3/train_model.py).
+[ssp.py](ssp.py), [inference.py](inference.py), [deploy.sh](deploy.sh),
+[deploy-remote.sh](deploy-remote.sh),
+[starter_3_4/part3/train_model.py](starter_3_4/part3/train_model.py). Code in sections 2–4 shows how
+those parts were built; section 6 notes what Part 4 changed.
 
 Contents
 
@@ -12,7 +14,8 @@ Contents
 3. [Deployment: getting it on the internet](#3-deployment-getting-it-on-the-internet)
 4. [Part 2: tracking users with a cookie and a database](#4-part-2-tracking-users-with-a-cookie-and-a-database)
 5. [Part 3: inferring demographics from searches](#5-part-3-inferring-demographics-from-searches)
-6. [Questions you should be able to answer](#6-questions-you-should-be-able-to-answer)
+6. [Part 4: selling ads on Boogle](#6-part-4-selling-ads-on-boogle)
+7. [Questions you should be able to answer](#7-questions-you-should-be-able-to-answer)
 
 ---
 
@@ -42,7 +45,9 @@ Contents
   in Postgres. This is "stateful tracking": the state (the cookie) lives in the browser, and the
   server uses it to link all of a person's visits together.
 - **Part 3:** offline machine learning. Given people's search histories, predict their gender,
-  age, income and so on. Part 4 will plug this model into the server to target ads.
+  age, income and so on.
+- **Part 4:** the server now runs a real-time ad auction on every page view, using the Part 3 model
+  to describe the visitor to advertisers.
 
 ---
 
@@ -86,7 +91,7 @@ def index():
   gets a 405, which satisfies "all other request types should return an error". (Flask also
   answers `HEAD` and `OPTIONS` automatically; HEAD is a GET without the body.)
 - `send_file` streams the file's bytes unchanged, which matters because the grader checks the page
-  byte for byte. `app.root_path` is the folder containing `app.py`, so the path works no matter
+  byte for byte. (Part 4 swapped the file for `new_boogle.html`, as the handout instructs.) `app.root_path` is the folder containing `app.py`, so the path works no matter
   which directory you start the server from.
 - We chose `send_file` over `app.send_static_file`: the latter only serves from a `static/` folder.
   `send_file` doesn't validate paths, which is fine here because the path is hard-coded and nothing
@@ -142,8 +147,8 @@ does all three.
 
   `ssh boogle-vm` now fills in the IP, the user and the key. `IdentitiesOnly yes` means "only try
   this key", so SSH doesn't offer every key on your machine.
-- Lessons from debugging: a key pasted by hand into `authorized_keys` was later removed by
-  Google's agent, so the durable way is **Compute Engine → Metadata → SSH keys**. That console form
+- Lessons from debugging: a key pasted by hand into `authorized_keys` stopped working weeks later,
+  so the more durable way is **Compute Engine → Metadata → SSH keys**. That console form
   wants the bare key; the username comes from the comment at the end.
 - **Deploy key:** the VM has its own key (`~/.ssh/github_deploy`) registered on GitHub as a
   read-only deploy key for this one repo. If the VM were compromised, it couldn't touch your other
@@ -208,9 +213,10 @@ curl -fsS "$PUBLIC_URL/jsontest"                          # final check from the
 set -euo pipefail                      # stop at the first failing command
 .venv/bin/pip install -q -r requirements.txt
 PGOPTIONS='-c client_min_messages=warning' psql -q -v ON_ERROR_STOP=1 -d boogle -f schema_handout.sql
+.venv/bin/python -c 'import app'       # added in Part 4: does the code and model load?
 sudo systemctl restart boogle
 ...                                    # if the service isn't active, print its logs and fail
-curl -fsS http://localhost/jsontest
+curl -fsS --retry 15 --retry-connrefused --retry-delay 1 http://localhost/jsontest
 curl -fsS http://localhost/api/history # goes through the database
 ```
 
@@ -407,7 +413,7 @@ def search():
 - NUL bytes are removed because Postgres text columns can't store them; the insert would error.
 - `query.strip()` is used **only to decide** whether the search is empty; the query is stored
   exactly as typed. Our first version stored the stripped text, and the grader failed us on
-  `"   padded with spaces   "`. That fix took Part 2 from 94/100 to all checks passing.
+  `"   padded with spaces   "`, which cost 2 checks (94/100) until we fixed it.
 - `redirect('/', code=303)` sends `303 See Other` with `Location: /`, so the browser reloads the
   home page, which then fetches the updated history. This is the Post/Redirect/Get pattern; it
   also means refreshing the page doesn't resubmit the search.
@@ -478,7 +484,7 @@ search_rows = ... "SELECT client_id, query, ts FROM searches WHERE client_id IS 
 [starter_3_4/part3/train_model.py](starter_3_4/part3/train_model.py). The script reads the
 starter data files next to it (`train.jsonl.gz`, `train_labels.csv`, `dev.jsonl.gz`,
 `dev_labels.csv`, `test.jsonl.gz`); those are the course's files, not ours.
-`model.joblib` is also produced, for Part 4. It isn't part of the submission.
+`model.joblib` is also produced, and Part 4's model comes from it. It isn't part of the submission.
 
 ### The task
 
@@ -634,15 +640,441 @@ def predict(model, users):
     joblib.dump(model, HERE / "model.joblib")
 ```
 - Writes the exact header the spec requires, then one row per test user in file order.
-- `joblib.dump` saves the fitted model so Part 4 can load it with `joblib.load` instead of
-  retraining. Part 4 must use "exactly your model from part 3".
+- `joblib.dump` saves the fitted model so it doesn't need retraining. Part 4 must use "exactly your
+  model from part 3", and section 6 explains how it reaches the server.
 
 I checked the output: 3,000 rows matching the test users in order, the exact header, and every
 value a valid label. Every class of every attribute gets predicted at least sometimes.
 
 ---
 
-## 6. Questions you should be able to answer
+## 6. Part 4: selling ads on Boogle
+
+Boogle now runs a real-time auction every time the ad iframe loads. Our server is a **Supply-Side
+Platform (SSP)**: it sells the ad slot. New files: [ssp.py](ssp.py) (the auction),
+[inference.py](inference.py) (the model inside the server), [export_model.py](export_model.py),
+[gunicorn.conf.py](gunicorn.conf.py). New routes in [app.py](app.py): `GET /ad` and
+`POST /ad/feedback`. New table: `auctions`, in [schema_handout.sql](schema_handout.sql).
+
+**To submit:** `server.txt` with the single line `35.252.229.92:80`.
+
+### Concepts
+
+**SSP, DSP and real-time bidding.** A *Demand-Side Platform* (DSP) buys ad slots for advertisers.
+For each page view, the SSP describes the slot and the visitor to several DSPs, they answer within
+a time limit, the SSP picks a winner, and the winner's ad is shown. All of this happens while the
+page loads. **OpenRTB** is the standard JSON format for those messages.
+
+```
+ browser ─ GET /ad ─► our SSP ─ read searches, predict segments, read blocklist (Postgres)
+                        │  POST bid request to all 4 DSPs at once
+                        ├──► steady  bids regularly, about $1.30–2.30
+                        ├──► niche   bids only on certain audiences, such as parents, about $4–6
+                        ├──► shady   high bids up to about $6, with bad ads
+                        └──► glitch  usually no bid; sometimes broken or slow
+                        │  after 400ms: drop late or invalid bids, pick the winner, set the price
+                        └──► GET burl (the bill) with the final price
+ browser ◄─ winning ad HTML ─┘
+```
+
+**Key bid request fields**
+
+| Field | Meaning |
+|---|---|
+| `id` | the auction ID; the response must echo it, and complaints refer to it |
+| `imp[0]` | the ad slot ("impression"): `id` "1", 300×250, and our `bidfloor` |
+| `device` | the visitor's user agent and IP |
+| `user.id` | the `boogle_id` cookie |
+| `user.data[0].segment` | what we claim about the user, as segment IDs; `ext.segtax: 500` names the taxonomy |
+| `tmax` | how many milliseconds DSPs have to answer (we send 250; our own cutoff is 400, see below) |
+| `badv` | advertiser domains we refuse; DSPs honor this list |
+
+**CPM** means cost per mille, the price per 1,000 impressions. A price of 2.00 earns Boogle $0.002
+for one ad.
+
+**Second-price auction.** The highest bidder wins but pays just above the runner-up:
+
+```
+price = min(winner's bid, max(second-highest bid, floor) + 0.01)
+```
+
+With bids of 5.00 and 3.00 the price is 3.01. With a lone 2.00 bid and our 0.50 floor it is 0.51. The
+`min` stops anyone paying more than they bid: in a tie at 2.00, the price is 2.00. The point is that
+bidders can bid what the slot is truly worth, without gaming their bid.
+
+**`burl`, the billing URL.** The winner's bid includes a URL containing the literal text
+`${AUCTION_PRICE}`. We replace that with the final price and make a GET request. Only that request
+earns money, so it must happen exactly once and only for the winner.
+
+**Segments and confidence.** Part 3 had to guess for every user. Part 4 must **leave a segment out
+when unsure**, because a false claim lies to advertisers. We claim a segment only when the model's
+probability is at least **0.7**. Because `model.joblib` was trained on train + dev, I measured this
+with a separate model fit on train only, so dev was truly unseen, and on shortened histories too,
+since new users have few searches:
+
+| Searches per user | 3 | 5 | 10 | 20 | all |
+|---|---|---|---|---|---|
+| Claims correct at ≥ 0.7 | 87% | 90% | 94% | 96% | 98% |
+| Claims per user | 1.5 | 1.8 | 2.2 | 2.6 | 3.5 |
+| "parent" claims correct | 93% | 96% | 97% | 98% | 99% |
+| Real parents found | 37% | 46% | 56% | 64% | 74% |
+
+So a new user gets few segments, and more appear as they search. `unknown` has no segment ID, so
+it's never claimed. The `niche` DSP bid in both probes that included 901 (parent) and in neither
+without it, which is how the model drives revenue: a good claim lets a $5 niche bid in. Its buyers
+in the grader run were kidsco and minivanly, plus medigapplus and cruiseco, which suggests older
+audiences too. The grader reported about 100% of niche's ads reached someone in its audience.
+
+**Sandboxed iframe.** The ad is someone else's HTML. `new_boogle.html` loads it in
+`<iframe sandbox="allow-popups allow-popups-to-escape-sandbox">`. Without `allow-scripts` the ad can't
+run code, and without `allow-same-origin` it can't read our page or cookies. Our `/ad` response repeats
+this with a `Content-Security-Policy: sandbox ...` header, so opening `/ad` directly is just as safe.
+
+**Threads vs processes.** Gunicorn has 2 worker processes with 8 threads each. An auction mostly
+*waits* on the network, and Python threads work well for waiting, so one worker handles several
+auctions at once. Each process has its own memory, so shared state like the blocklist must live in
+Postgres.
+
+### Why a separate model file
+
+The VM can't load `model.joblib`. A pickle needs matching library versions, and the VM's Python 3.11
+can't install the Mac's numpy 2.5 and scikit-learn 1.9. Installing scikit-learn would also use
+memory on a 1 GB machine for code we barely need, because *prediction* is simple arithmetic.
+
+[export_model.py](export_model.py) saves the same fitted numbers (vocabulary, IDF, weights) to
+`model.npz`, a plain numpy file, and [inference.py](inference.py) redoes the arithmetic with numpy.
+The script then checks both agree: all 5,000 dev and test users got identical predictions, with
+probabilities within 0.00000002 (the tiny gap is from storing weights as 32-bit floats, which
+also shrinks the file from 54 MB to 25 MB). It is still "exactly the model from Part 3".
+
+`model.npz` is too big for git, so [deploy-remote.sh](deploy-remote.sh) copies it to the VM with `scp`
+when its hash differs.
+
+### [inference.py](inference.py), line by line
+
+```python
+TOKEN = re.compile(r"(?u)\b\w\w+\b")
+```
+- TfidfVectorizer's default definition of a word: two or more word characters.
+
+```python
+def tfidf(self, text):
+    tokens = TOKEN.findall(text.lower())
+    counts = Counter(tokens + [f"{a} {b}" for a, b in zip(tokens, tokens[1:])])
+    known = [(self.vocabulary[t], count) for t, count in counts.items() if t in self.vocabulary]
+    if not known:
+        return [], np.zeros(0)
+    indices = [i for i, _ in known]
+    values = (1 + np.log([count for _, count in known])) * self.idf[indices]
+    return indices, values / np.linalg.norm(values)
+```
+- This is TF-IDF from section 5 by hand. `zip(tokens, tokens[1:])` pairs each word with the next
+  to make bigrams. Words outside the training vocabulary are dropped.
+- `1 + log(count)` is sublinear TF, multiplied by IDF, then divided by the length (L2 norm).
+- A user has only a few hundred features out of 137,946, so it returns just the non-zero ones.
+
+```python
+def probabilities(self, text):
+    indices, values = self.tfidf(text)
+    ...
+    scores = self.coef[attribute][:, indices] @ values + self.intercept[attribute]
+    if len(scores) == 1:
+        p = 1 / (1 + math.exp(-scores[0]))
+        result[attribute] = np.array([1 - p, p])
+    else:
+        exp = np.exp(scores - scores.max())
+        result[attribute] = exp / exp.sum()
+```
+- `@` is the dot product: `w · x + b`, one score per class, using only this user's columns.
+- Two classes (parental status) have one score, turned into a probability by the sigmoid.
+- More classes use softmax. Subtracting the max first avoids overflow without changing the result.
+
+```python
+def segments(self, text):
+    ids = []
+    for attribute, probs in self.probabilities(text).items():
+        best = int(probs.argmax())
+        segment = self.segment_ids.get((attribute, self.classes[attribute][best]))
+        if segment and probs[best] >= CONFIDENCE:
+            ids.append(segment)
+    return ids
+```
+- One best guess per attribute, so at most one segment per attribute, as `segments.json` requires.
+  `.get` returns `None` for `unknown`, which has no segment.
+
+### [ssp.py](ssp.py), line by line
+
+```python
+session = requests.Session()
+for scheme in ('https://', 'http://'):
+    session.mount(scheme, HTTPAdapter(pool_maxsize=32))
+executor = ThreadPoolExecutor(max_workers=32)
+```
+- A `Session` keeps connections open for reuse. `executor` is a pool of threads for asking DSPs
+  in parallel.
+
+**The cold-start bug.** On the first live test, the first two auctions showed no ad. Measured from the
+VM, a new TLS connection took **300–535 ms** per DSP, longer than `tmax`, while a reused one took
+30–75 ms. There were two fixes:
+
+```python
+def warm_connections():
+    global last_warmed
+    if time.monotonic() - last_warmed >= WARM_EVERY:
+        last_warmed = time.monotonic()
+        for _ in range(SPARE_CONNECTIONS):
+            executor.submit(ping)
+```
+- The first fix opens spare connections ahead of time, when a worker starts (a hook in `gunicorn.conf.py`) and at
+  most once a minute on incoming requests (`@app.before_request`). All 8 pings go at once, so
+  each needs its own connection. Being traffic-driven, it sends nothing while nobody uses Boogle.
+- `time.monotonic()` is a clock that never jumps backward, which suits measuring intervals.
+
+```python
+def ask_dsp(dsp, bid_request):
+    try:
+        return session.post(f'{RTB_URL}/{dsp}/bid', json=bid_request, timeout=HTTP_TIMEOUT)
+    except requests.RequestException:
+        return None
+```
+- The second fix: this timeout is 2 s, **not** the auction deadline. If `requests` gave up at the
+  deadline, it would close the connection, and the next auction would need a new one.
+  `collect_bids` enforces the deadline instead, and a late response finishes harmlessly in the
+  background, leaving its connection reusable.
+
+```python
+def collect_bids(bid_request, blocked):
+    futures = [executor.submit(ask_dsp, dsp, bid_request) for dsp in DSPS]
+    done, _ = wait(futures, timeout=DEADLINE_MS / 1000)
+    bids = []
+    for future in futures:
+        if future in done:
+            bids += parse_bids(future.result(), bid_request['id'], blocked)
+    return bids
+```
+- `submit` starts all four requests at once. If they ran one after another, a slow DSP would use up
+  everyone's time.
+- `wait(timeout=0.4)` returns when all are finished or at 400 ms, whichever is first. Anything not
+  in `done` is late and never read. This is filter 1, "arrive after tmax".
+
+**The second-price bug: why the cutoff is 400 ms and not 250.** The first grader run scored 90/100,
+with 58 of 886 bills (6.5%) wrong, such as charging 0.51 on a 3.2585 bid. We had seen only one valid
+bid in an auction that really had two. My first guess, running out of connections, was wrong: a
+load test at the grader's rate never opened a new one. The timings showed three clear groups:
+
+| Bids | Arrive at |
+|---|---|
+| Normal | 30–75 ms |
+| On time but stalled | ~270–385 ms |
+| Deliberately late | 528 ms or later |
+
+The middle group is a normal response plus about 230 ms, on about 6% of requests. It didn't change
+with the `tmax` we sent (100, 250 or 600), it happened on a non-bidding URL too, it happened from my
+Mac as well as the VM, and the VM's TCP counters showed no retransmissions. So the DSP answered on
+time, and the delay came from the exchange's end; the exact cause isn't known. The grader counts
+those bids as valid, so dropping them mispriced the auction.
+
+So `TMAX_MS` (what we *tell* DSPs) stayed 250, and `DEADLINE_MS` (when we *stop listening*) became 400,
+which sits in the gap between the second and third groups. **This is a deliberate reading of
+"arrive after tmax"**: a bid arriving at 300 ms on our clock is accepted, because the evidence says
+it was sent on time. Bids the DSP truly held back, 528 ms or later, are still dropped. The cost is that
+a slow auction now takes up to 400 ms rather than 250.
+
+```python
+def parse_bids(response, auction_id, blocked):
+    if response is None or response.status_code != 200:
+        return []
+    try:
+        body = json.loads(response.content)
+    except ValueError:
+        return []
+    if not isinstance(body, dict) or body.get('id') != auction_id:
+        return []
+    if body.get('cur', 'USD') != 'USD' or not isinstance(body.get('seatbid'), list):
+        return []
+```
+- 204 ("no bid") and errors yield nothing. A failed parse is filter 2, "not valid JSON". The type
+  checks matter because valid JSON can still be the wrong shape, like `[1,2]` or `null`.
+- A mismatched `id` means this answers some other auction (OpenRTB requires the echo).
+- `cur` is filter 3. OpenRTB says a missing `cur` means USD, so that's accepted.
+- Then it loops over every bid of every seat, because one response can contain several bids.
+
+```python
+def is_valid_bid(bid, blocked):
+    ...
+    return (
+        isinstance(price, (int, float)) and not isinstance(price, bool) and math.isfinite(price)
+        and price >= BID_FLOOR                         # filter 6
+        and bid.get('impid') == IMP_ID                 # filter 4
+        and bid.get('w') == SLOT_W and bid.get('h') == SLOT_H   # filter 5
+        and isinstance(adm, str) and adm.strip() != ''
+        and isinstance(burl, str) and burl.startswith(RTB_URL + '/') and PRICE_MACRO in burl
+        and not blocked.intersection(advertiser_domains(bid)))
+```
+- Python's `json` accepts `NaN` and `Infinity`, and `True` counts as an `int`, so the price check is
+  stricter than it looks. An `Infinity` bid would otherwise always win.
+- `adm` must exist, or there's nothing to show.
+- `burl` must point at the exchange because *our server fetches that URL*. Without the check, a
+  malicious bid could make it request internal addresses (a server-side request forgery, SSRF).
+- The last line drops blocked advertisers even if a DSP ignored `badv`.
+
+```python
+def clearing_price(prices):
+    second = prices[1] if len(prices) > 1 else 0
+    return min(prices[0], round(max(second, BID_FLOOR) + 0.01, 4))
+```
+- The formula, given valid bids sorted high to low. `round` removes float noise like
+  3.0100000000000002. Bids have 4 decimals. Invalid bids never reach this, so a bad bid can't
+  raise anyone's price.
+
+```python
+def bill(bid, price):
+    try:
+        return session.get(bid['burl'].replace(PRICE_MACRO, str(price)), timeout=HTTP_TIMEOUT).ok
+```
+- Called once, for the winner. There's no retry: a timed-out bill may have arrived anyway, and
+  billing twice would be worse. Whether it succeeded is recorded in `auctions.billed`.
+
+### The new routes in [app.py](app.py)
+
+**`GET /ad`**
+
+```python
+if request.method == 'HEAD':
+    return '', 200
+```
+- Flask sends HEAD to GET routes. Without this, a HEAD request would run an auction and charge a DSP.
+
+```python
+client_id = get_client_id()
+is_new = client_id is None
+if is_new:
+    client_id = uuid.uuid4()
+with db() as conn:
+    log_request(conn, client_id)
+    searches = conn.execute("SELECT query FROM searches WHERE client_id = %s
+                             ORDER BY ts DESC, search_id DESC LIMIT %s", ...).fetchall()
+    blocked = blocked_advertisers(conn)
+```
+- Same identity logic as `/`, so DSPs always get a valid ID, even if `/ad` is the first thing a
+  visitor hits (the spec doesn't cover that case).
+- Newest first, the order the training data used.
+
+```python
+segments = model.segments("\n".join(query for query, in searches))
+auction = run_auction(client_id, segments, blocked, request.headers.get('User-Agent', ''), request.remote_addr)
+```
+- The first `with db()` block has already ended, so **no database connection is held** during the
+  wait for bids.
+- `for query, in searches` unpacks each one-column row.
+
+```python
+winner = auction['winner'] or {}
+with db() as conn:
+    conn.execute("INSERT INTO auctions (...) VALUES (...)", ...)
+```
+- Every auction is recorded, even with no winner: the row is how `/ad/feedback` later finds out
+  who won, and how complaint rates are computed.
+
+```python
+html = f'<!doctype html><html><body style="margin:0">{winner["adm"]}</body></html>' if winner else ''
+response = app.response_class(html, mimetype='text/html')
+response.headers['Cache-Control'] = 'no-store'
+response.headers['Content-Security-Policy'] = 'sandbox allow-popups allow-popups-to-escape-sandbox'
+```
+- With no winner, this is a 200 with an empty body, as the spec requires.
+- `margin:0` removes the browser's default 8 px margin so the ad fits the slot exactly.
+- `no-store` matters: a cached response would show an ad with no auction and no payment.
+
+**Blocking advertisers**
+
+```python
+def blocked_advertisers(conn):
+    rows = conn.execute(
+        "SELECT domain FROM auctions, unnest(adomain) AS domain GROUP BY domain "
+        "HAVING count(*) FILTER (WHERE complained) >= %s "
+        "AND count(*) FILTER (WHERE complained) >= %s * count(*)",
+        (MIN_COMPLAINTS, MAX_COMPLAINT_RATE)).fetchall()
+    return {domain for domain, in rows}
+```
+- `unnest` gives one row per domain per auction, `GROUP BY` collects them, and `count(*)` is that
+  advertiser's impressions. `FILTER` counts only the complained ones. `HAVING` filters after grouping.
+- An advertiser is blocked with **at least 2 complaints and at least 5% of impressions complained
+  about**. Two conditions, because one complaint could be bad luck, and a few complaints on an
+  advertiser with thousands of impressions are normal. Blocking steady by mistake would hurt twice:
+  we'd lose its ads, and without its bid, second prices would drop to the floor.
+- These two numbers are starting guesses: the handout doesn't say what a complaint costs.
+- Blocked domains go in `badv`, so the DSP won't bid them, and shady's domains eventually drop out.
+  Niche's ~$5 bids can then win instead of being outbid by shady's ~$6.
+
+**`POST /ad/feedback`**
+
+```python
+body = request.get_json(force=True, silent=True)
+if not isinstance(body, dict) or not isinstance(body.get('auction_id'), str):
+    return jsonify({"error": ...}), 400
+if body.get('event') != 'complaint':
+    return '', 204
+with db() as conn:
+    found = conn.execute(
+        "UPDATE auctions SET complained = true WHERE auction_id = %s AND bid_id IS NOT NULL "
+        "RETURNING auction_id", (body['auction_id'],)).fetchone()
+return ('', 204) if found else (jsonify({"error": "unknown auction"}), 404)
+```
+- `force=True` parses the body as JSON whatever its `Content-Type`. `silent=True` returns `None`
+  on bad JSON instead of raising.
+- `complained` is a boolean, so a repeated complaint about one auction counts once.
+- `bid_id IS NOT NULL` ignores complaints about auctions nobody won.
+
+### Serving it: [gunicorn.conf.py](gunicorn.conf.py)
+
+```python
+worker_class = 'gthread'
+threads = 8
+preload_app = True
+
+def post_worker_init(worker):
+    import ssp
+    ssp.warm_connections()
+```
+- Gunicorn reads this file from its working directory automatically, so we didn't need to edit the
+  service file.
+- `preload_app` loads the model once before forking. The OS shares that memory between workers until
+  one writes to it (*copy-on-write*), which matters on 1 GB. Each worker uses about 90 MB, and the VM
+  had about 460 MB available after deploying.
+
+[deploy.sh](deploy.sh) also gained `python -c 'import app'` before the restart, so broken code or a
+missing model stops the deploy while the old version keeps serving.
+
+### Design choices
+
+| Situation | What we do | Why |
+|---|---|---|
+| Bid floor | 0.50 | the handout's example; below every steady bid we saw |
+| Bid deadline | 400 ms, with `tmax` 250 sent to DSPs | keeps on-time bids that stalled in delivery; truly late bids start at 528 ms |
+| Complaint rule | ≥ 2 complaints and ≥ 5% rate | one-off complaints shouldn't block steady |
+| `/ad` with no cookie | mint an ID and set the cookie | DSPs always get a valid `user.id` |
+| Response with no `cur` | treated as USD | OpenRTB's default |
+| Billing fails | still show the ad, record `billed = false` | it already won; never retry |
+| `HEAD /ad` | no auction | mustn't charge anyone |
+
+### How it was tested
+
+- **216 checks against a fake DSP** that sends each failure on demand: every filter (tested by
+  offering a tempting $9 bad bid beside a legitimate one), every pricing case including stalled
+  bids, exact-once billing, blocking, and 40 concurrent auctions.
+- **The handout's `dsp.py`:** one bill at the right price, no warnings.
+- **Real Chrome:** the ad fills the 300×250 iframe, and the iframe's request carried the cookie.
+- **Live DSPs:** niche won all 6 auctions for a user with parent-style searches, every winner was
+  billed, and 8 out of 8 auctions right after a restart served an ad.
+- **The grader's first run (90/100):** 960 ad views at up to 20 auctions per second, net profit
+  $1.28 where a naive SSP would make -$0.99, and niche won 222 ads. Ads that cost more in expected
+  complaints than they bid fell from 19% in round 1 to 0% from round 3, so the complaint rule worked.
+  The only failed check was the second-price one, fixed above.
+
+---
+
+## 7. Questions you should be able to answer
 
 - **Why does the server return 303 after a search instead of 200?** To send the browser back to `/`
   (Post/Redirect/Get). The page reloads and fetches the new history, and refreshing doesn't
@@ -672,3 +1104,25 @@ value a valid label. Every class of every attribute gets predicted at least some
   refit on train + dev for the final predictions.
 - **What does `C` control?** Inverse regularization strength: larger `C` fits the training data
   more closely, with more risk of overfitting.
+- **What's the difference between an SSP and a DSP?** The SSP sells the slot for the publisher; DSPs
+  buy on behalf of advertisers.
+- **How is the price set?** Second price: `min(winner, max(second, floor) + 0.01)`. The bid floor is
+  the minimum we accept, and it sets the price for a lone bidder.
+- **Why ask all DSPs at once?** So one slow DSP can't use up the others' time. `wait` enforces the
+  deadline.
+- **Why is the deadline 400 ms when `tmax` is 250?** About 6% of on-time bids stall ~230 ms in
+  delivery, which made us misprice auctions. Truly late bids start at 528 ms, so 400 ms separates them.
+- **Which bids get filtered?** Late, invalid JSON, non-USD, wrong `impid`, not 300×250, below floor.
+  We also drop a wrong response `id`, a bad price, an empty `adm`, a suspicious `burl`, and blocked
+  advertisers.
+- **Why does the worker keep connections warm?** A new TLS connection takes 300–535 ms from the VM,
+  so auctions on cold connections would lose bids.
+- **Why leave segments out?** A wrong claim misleads advertisers. We claim only at probability ≥ 0.7.
+- **How does the model affect revenue?** Niche bids only on audiences it wants, such as "parent"
+  (901). A confident claim brings in ~$5 bids and raises the second price.
+- **How do complaints work?** Each marks an auction in the `auctions` table. An advertiser with at
+  least 2 complaints and a rate of at least 5% goes into `badv`, and its bids are dropped locally too.
+- **How is the ad kept from harming the page?** A sandboxed iframe with no scripts and no same-origin
+  access, plus a matching CSP header on `/ad`.
+- **Why isn't scikit-learn on the VM?** The pickle needs versions the VM can't install, so the same
+  weights are exported to `model.npz`, and `export_model.py` proves the predictions match.
